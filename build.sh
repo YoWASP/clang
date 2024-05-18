@@ -1,0 +1,289 @@
+#!/bin/sh -ex
+
+export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+
+WASI_SDK=wasi-sdk-22.0
+WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-22/wasi-sdk-22.0-linux.tar.gz
+if ! [ -d ${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; fi
+WASI_SDK_PATH=$(pwd)/${WASI_SDK}
+
+WASI_SYSROOT="--sysroot ${WASI_SDK_PATH}/share/wasi-sysroot"
+WASI_TARGET="wasm32-wasip1"
+WASI_CFLAGS=""
+WASI_LDFLAGS=""
+WASI_TARGET_LLVM="${WASI_TARGET}-threads"
+WASI_CFLAGS_LLVM="${WASI_CFLAGS} -pthread"
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS}"
+# LLVM has some (unreachable in our configuration) calls to mmap.
+WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} -D_WASI_EMULATED_MMAN"
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -lwasi-emulated-mman"
+# Depending on the code being compiled, both Clang and LLD can consume unbounded amounts of memory.
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -Wl,--max-memory=4294967296"
+# Compiling C++ code requires a lot of stack space and can overflow and corrupt the heap.
+# (For example, `#include <iostream>` alone does it in a build with the default stack size.)
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -Wl,-z,stack-size=1048576 -Wl,--stack-first"
+# Some of the host APIs that are statically required by LLVM (notably threading) are dynamically
+# never used. An LTO build removes imports of these APIs, simplifying deployment
+WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} -flto"
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -flto -Wl,--strip-all"
+
+# We need two toolchain files: one for the compiler itself (which needs threads at the moment since
+# -DLLVM_ENABLE_THREADS=OFF is kind of broken), and one for the runtime libs.
+cat >Toolchain-WASI.cmake <<END
+set(WASI TRUE)
+
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_VERSION 1)
+set(CMAKE_SYSTEM_PROCESSOR wasm32)
+set(CMAKE_EXECUTABLE_SUFFIX ".wasm")
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+set(CMAKE_C_COMPILER ${WASI_SDK_PATH}/bin/clang)
+set(CMAKE_CXX_COMPILER ${WASI_SDK_PATH}/bin/clang++)
+set(CMAKE_LINKER ${WASI_SDK_PATH}/bin/wasm-ld CACHE STRING "wasienv build")
+set(CMAKE_AR ${WASI_SDK_PATH}/bin/ar CACHE STRING "wasienv build")
+set(CMAKE_RANLIB ${WASI_SDK_PATH}/bin/ranlib CACHE STRING "wasienv build")
+END
+cp Toolchain-WASI.cmake Toolchain-WASI-LLVM.cmake
+cat >>Toolchain-WASI.cmake <<END
+set(CMAKE_C_COMPILER_TARGET ${WASI_TARGET})
+set(CMAKE_CXX_COMPILER_TARGET ${WASI_TARGET})
+set(CMAKE_C_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS}" CACHE STRING "wasienv build")
+set(CMAKE_CXX_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS}" CACHE STRING "wasienv build")
+set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS}" CACHE STRING "wasienv build")
+END
+cat >>Toolchain-WASI-LLVM.cmake <<END
+set(CMAKE_C_COMPILER_TARGET ${WASI_TARGET_LLVM})
+set(CMAKE_CXX_COMPILER_TARGET ${WASI_TARGET_LLVM})
+set(CMAKE_C_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS_LLVM}" CACHE STRING "wasienv build")
+set(CMAKE_CXX_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS_LLVM}" CACHE STRING "wasienv build")
+set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS_LLVM}" CACHE STRING "wasienv build")
+END
+
+# The clang binary built as `Debug` doesn't pass Wasm validation.
+# (This has cost me a hour of my life.)
+
+LLVM_VERSION_MAJOR=$(cmake -P Get-LLVM-Version.cmake 2>&1)
+
+if ! [ -f llvm-tblgen-build/bin/llvm-tblgen -a -f llvm-tblgen-build/bin/clang-tblgen ]; then
+  mkdir -p llvm-tblgen-build
+  cmake -B llvm-tblgen-build -S llvm-src/llvm \
+    -DLLVM_CCACHE_BUILD=ON \
+    -DCMAKE_BUILD_TYPE=MinSizeRel \
+    -DLLVM_BUILD_RUNTIME=OFF \
+    -DLLVM_BUILD_TOOLS=OFF \
+    -DLLVM_INCLUDE_UTILS=OFF \
+    -DLLVM_INCLUDE_RUNTIMES=OFF \
+    -DLLVM_INCLUDE_EXAMPLES=OFF \
+    -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_INCLUDE_BENCHMARKS=OFF \
+    -DLLVM_INCLUDE_DOCS=OFF \
+    -DLLVM_TARGETS_TO_BUILD=WebAssembly \
+    -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi \
+    -DLLVM_ENABLE_PROJECTS="clang" \
+    -DCLANG_BUILD_EXAMPLES=OFF \
+    -DCLANG_BUILD_TOOLS=OFF \
+    -DCLANG_INCLUDE_TESTS=OFF
+  cmake --build llvm-tblgen-build --target llvm-tblgen --target clang-tblgen
+fi
+
+mkdir -p llvm-build
+cmake -B llvm-build -S llvm-src/llvm \
+  -DCMAKE_TOOLCHAIN_FILE=../Toolchain-WASI-LLVM.cmake \
+  -DLLVM_CCACHE_BUILD=ON \
+  -DLLVM_NATIVE_TOOL_DIR=$(pwd)/llvm-tblgen-build/bin \
+  -DCMAKE_BUILD_TYPE=MinSizeRel \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DLLVM_BUILD_SHARED_LIBS=OFF \
+  -DLLVM_ENABLE_PIC=OFF \
+  -DLLVM_BUILD_STATIC=ON \
+  -DLLVM_ENABLE_THREADS=OFF \
+  -DLLVM_BUILD_RUNTIME=OFF \
+  -DLLVM_BUILD_TOOLS=OFF \
+  -DLLVM_INCLUDE_UTILS=OFF \
+  -DLLVM_BUILD_UTILS=OFF \
+  -DLLVM_INCLUDE_RUNTIMES=OFF \
+  -DLLVM_INCLUDE_EXAMPLES=OFF \
+  -DLLVM_INCLUDE_TESTS=OFF \
+  -DLLVM_INCLUDE_BENCHMARKS=OFF \
+  -DLLVM_INCLUDE_DOCS=OFF \
+  -DLLVM_TARGETS_TO_BUILD=WebAssembly \
+  -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1 \
+  -DLLVM_TOOL_BUGPOINT_BUILD=OFF \
+  -DLLVM_TOOL_BUGPOINT_PASSES_BUILD=OFF \
+  -DLLVM_TOOL_DSYMUTIL_BUILD=OFF \
+  -DLLVM_TOOL_DXIL_DIS_BUILD=OFF \
+  -DLLVM_TOOL_GOLD_BUILD=OFF \
+  -DLLVM_TOOL_LLC_BUILD=OFF \
+  -DLLVM_TOOL_LLI_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_AR_BUILD=ON \
+  -DLLVM_TOOL_LLVM_AS_BUILD=ON \
+  -DLLVM_TOOL_LLVM_AS_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_BCANALYZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_CAT_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_CFI_VERIFY_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_CONFIG_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_COV_BUILD=ON \
+  -DLLVM_TOOL_LLVM_CVTRES_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_CXXDUMP_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_CXXFILT_BUILD=ON \
+  -DLLVM_TOOL_LLVM_CXXMAP_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_C_TEST_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DEBUGINFOD_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DEBUGINFOD_FIND_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DEBUGINFO_ANALYZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DIFF_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DIS_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DIS_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DLANG_DEMANGLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DRIVER_BUILD=ON \
+  -DLLVM_TOOL_LLVM_DWARFDUMP_BUILD=ON \
+  -DLLVM_TOOL_LLVM_DWARFUTIL_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_DWP_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_EXEGESIS_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_EXTRACT_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_GSYMUTIL_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_IFS_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_ISEL_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_ITANIUM_DEMANGLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_JITLINK_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_JITLISTENER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_LIBTOOL_DARWIN_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_LINK_BUILD=ON \
+  -DLLVM_TOOL_LLVM_LIPO_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_LTO2_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_LTO_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MCA_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MC_ASSEMBLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MC_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MC_DISASSEMBLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MICROSOFT_DEMANGLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_ML_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MODEXTRACT_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_MT_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_NM_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_OBJCOPY_BUILD=ON \
+  -DLLVM_TOOL_LLVM_OBJDUMP_BUILD=ON \
+  -DLLVM_TOOL_LLVM_OPT_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_OPT_REPORT_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_PDBUTIL_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_PROFDATA_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_PROFGEN_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_RC_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_READOBJ_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_READTAPI_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_REDUCE_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_REMARKUTIL_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_RTDYLD_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_RUST_DEMANGLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_SHLIB_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_SIM_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_SIZE_BUILD=ON \
+  -DLLVM_TOOL_LLVM_SPECIAL_CASE_LIST_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_SPLIT_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_STRESS_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_STRINGS_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_SYMBOLIZER_BUILD=ON \
+  -DLLVM_TOOL_LLVM_TLI_CHECKER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_UNDNAME_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_XRAY_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_YAML_NUMERIC_PARSER_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_YAML_PARSER_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_LTO_BUILD=OFF \
+  -DLLVM_TOOL_OBJ2YAML_BUILD=OFF \
+  -DLLVM_TOOL_OPT_BUILD=OFF \
+  -DLLVM_TOOL_OPT_VIEWER_BUILD=OFF \
+  -DLLVM_TOOL_REDUCE_CHUNK_LIST_BUILD=OFF \
+  -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
+  -DLLVM_TOOL_SANCOV_BUILD=OFF \
+  -DLLVM_TOOL_SANSTATS_BUILD=OFF \
+  -DLLVM_TOOL_SPIRV_TOOLS_BUILD=OFF \
+  -DLLVM_TOOL_VERIFY_USELISTORDER_BUILD=OFF \
+  -DLLVM_TOOL_VFABI_DEMANGLE_FUZZER_BUILD=OFF \
+  -DLLVM_TOOL_XCODE_TOOLCHAIN_BUILD=OFF \
+  -DLLVM_TOOL_YAML2OBJ_BUILD=OFF \
+  -DLLVM_ENABLE_PROJECTS="clang;lld" \
+  -DCLANG_ENABLE_ARCMT=OFF \
+  -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
+  -DCLANG_INCLUDE_TESTS=OFF \
+  -DCLANG_BUILD_TOOLS=OFF \
+  -DCLANG_TOOL_CLANG_SCAN_DEPS_BUILD=OFF \
+  -DCLANG_TOOL_CLANG_INSTALLAPI_BUILD=OFF \
+  -DCLANG_BUILD_EXAMPLES=OFF \
+  -DCLANG_INCLUDE_DOCS=OFF \
+  -DCLANG_LINKS_TO_CREATE="clang;clang++" \
+  -DLLD_BUILD_TOOLS=OFF \
+  -DCMAKE_INSTALL_PREFIX=llvm-prefix
+# The "all" target still contains far too much stuff, even given all the options above, so build
+# only Clang/LLD, explicitly. For the same reason using the "install" target is infeasible.
+# I spent a while trying and it leads nowhere.
+cmake --build llvm-build --target llvm-driver
+cmake --build llvm-build --target install-core-resource-headers
+
+# Install the driver (which is a multi-call binary) manually.
+mkdir -p wasi-prefix/bin
+cp llvm-build/bin/llvm wasi-prefix/bin/llvm.wasm
+
+# Install "core" headers (which are a part of the compiler and not the libc) manually.
+# Having the LLVM major version is an inconvenience in our case, since the compiler data files
+# are embedded into the binary and they won't ever conflict between versions.
+cp -r llvm-prefix/lib/clang/${LLVM_VERSION_MAJOR}/* wasi-prefix/
+
+# Options below heavily based on wasi-sdk.
+mkdir -p compiler-rt-build
+cmake -B compiler-rt-build -S llvm-src/compiler-rt \
+  -DCMAKE_TOOLCHAIN_FILE=../Toolchain-WASI.cmake \
+  -DCOMPILER_RT_BAREMETAL_BUILD=ON \
+  -DCOMPILER_RT_BUILD_XRAY=OFF \
+  -DCOMPILER_RT_INCLUDE_TESTS=OFF \
+  -DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
+  -DCOMPILER_RT_ENABLE_IOS=OFF \
+  -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+  -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON \
+  -DCMAKE_INSTALL_PREFIX=wasi-prefix
+cmake --build compiler-rt-build --target install
+
+make -C wasi-libc-src \
+  CC=${WASI_SDK_PATH}/bin/clang \
+  AR=${WASI_SDK_PATH}/bin/ar \
+  NM=${WASI_SDK_PATH}/bin/nm \
+  TARGET_TRIPLE=${WASI_TARGET} \
+  SYSROOT=$(pwd)/wasi-prefix
+
+# Options below heavily based on wasi-sdk.
+mkdir -p libcxx-build
+cmake -B libcxx-build -S llvm-src/runtimes \
+  -DCMAKE_TOOLCHAIN_FILE=../Toolchain-WASI.cmake \
+  -DLLVM_ENABLE_RUNTIMES:STRING="libcxx;libcxxabi" \
+  -DLIBCXX_ENABLE_THREADS:BOOL=OFF \
+  -DLIBCXX_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF \
+  -DLIBCXX_ENABLE_SHARED:BOOL=OFF \
+  -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=OFF \
+  -DLIBCXX_ENABLE_FILESYSTEM:BOOL=ON \
+  -DLIBCXX_ENABLE_EXPERIMENTAL_LIBRARY:BOOL=OFF \
+  -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT:BOOL=OFF \
+  -DLIBCXX_CXX_ABI=libcxxabi \
+  -DLIBCXX_CXX_ABI_INCLUDE_PATHS=$(pwd)/llvm-src/libcxxabi/include \
+  -DLIBCXX_HAS_MUSL_LIBC:BOOL=ON \
+  -DLIBCXX_ABI_VERSION=2 \
+  -DLIBCXXABI_ENABLE_THREADS:BOOL=OFF \
+  -DLIBCXXABI_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF \
+  -DLIBCXXABI_ENABLE_PIC:BOOL=OFF \
+  -DLIBCXXABI_ENABLE_SHARED:BOOL=OFF \
+  -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=OFF \
+  -DLIBCXXABI_USE_LLVM_UNWINDER:BOOL=OFF \
+  -DLIBCXXABI_SILENT_TERMINATE:BOOL=ON \
+  -DLIBCXX_LIBDIR_SUFFIX=/${WASI_TARGET} \
+  -DLIBCXXABI_LIBDIR_SUFFIX=/${WASI_TARGET} \
+  -DCMAKE_INSTALL_PREFIX=wasi-prefix
+cmake --build libcxx-build --target install
+
+# Crimees. For testing only!
+cp driverdriver.py wasi-prefix/bin/
+for tool in $(__DRIVERDRIVER_LIST=1 ./driverdriver.py); do
+  ln -sf driverdriver.py wasi-prefix/bin/${tool}
+done

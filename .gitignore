@@ -1,0 +1,6 @@
+/wasi-sdk-*.*
+*.wasm
+
+/*-build
+/*-prefix
+/Toolchain-WASI*.cmake
