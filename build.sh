@@ -14,7 +14,7 @@ WASI_LDFLAGS="-O0" # "-flto -Wl,--strip-all"
 # LLVM doesn't build without <mutex>, etc, even with -DLLVM_ENABLE_THREADS=OFF.
 WASI_TARGET="${WASI_TARGET}-threads"
 WASI_CFLAGS="${WASI_CFLAGS} -pthread"
-WASI_LDFLAGS="${WASI_LDFLAGS} -Wl,--max-memory=4294967296"
+WASI_LDFLAGS="${WASI_LDFLAGS} -Wl,--max-memory=4294967296,--export-memory,--import-memory"
 # LLVM assumes the existence of mmap.
 WASI_CFLAGS="${WASI_CFLAGS} -D_WASI_EMULATED_MMAN"
 WASI_LDFLAGS="${WASI_LDFLAGS} -lwasi-emulated-mman"
