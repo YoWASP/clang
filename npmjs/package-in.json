@@ -1,0 +1,38 @@
+{
+    "name": "@yowasp/clang",
+    "version": "__VERSION__",
+    "description": "LLVM/Clang/LLD toolchain targeting WebAssembly",
+    "author": "Catherine <whitequark@whitequark.org>",
+    "license": "ISC",
+    "homepage": "https://yowasp.org/",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/YoWASP/clang.git"
+    },
+    "bugs": {
+        "url": "https://github.com/YoWASP/clang/issues"
+    },
+    "type": "module",
+    "files": [
+        "lib/api.d.ts",
+        "gen/bundle.js",
+        "gen/*-resources.tar",
+        "gen/*.wasm"
+    ],
+    "exports": {
+        "types": "./lib/api.d.ts",
+        "default": "./gen/bundle.js"
+    },
+    "types": "./lib/api.d.ts",
+    "devDependencies": {
+        "@bytecodealliance/jco": "1.15.1",
+        "@yowasp/runtime": "11.0.67",
+        "esbuild": "^0.25.11"
+    },
+    "scripts": {
+        "transpile": "jco new ../llvm-build/bin/llvm --wasi-command --output llvm.wasm && jco transpile llvm.wasm --instantiation async --no-typescript --no-namespaced-exports --map 'wasi:io/*=runtime#io' --map 'wasi:cli/*=runtime#cli' --map 'wasi:clocks/*=runtime#*' --map 'wasi:filesystem/*=runtime#fs' --map 'wasi:random/*=runtime#random' --out-dir gen/",
+        "pack": "yowasp-pack-resources gen/llvm-resources.js gen ../wasi-prefix/usr usr",
+        "build": "esbuild --bundle lib/api.js --outfile=gen/bundle.js --format=esm --platform=node",
+        "all": "npm run transpile && npm run pack && npm run build"
+    }
+}

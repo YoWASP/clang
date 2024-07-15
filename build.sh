@@ -2,17 +2,16 @@
 
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 
-WASI_SDK=wasi-sdk-22.0
-WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-22/wasi-sdk-22.0-linux.tar.gz
+WASI_VER=27
+WASI_SDK=wasi-sdk-${WASI_VER}.0-x86_64-linux
+WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VER}/${WASI_SDK}.tar.gz
 if ! [ -d ${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; fi
 WASI_SDK_PATH=$(pwd)/${WASI_SDK}
 
-WASI_SYSROOT="--sysroot ${WASI_SDK_PATH}/share/wasi-sysroot"
 WASI_TARGET="wasm32-wasip1"
-WASI_CFLAGS=""
-WASI_LDFLAGS=""
-WASI_TARGET_LLVM="${WASI_TARGET}-threads"
-WASI_CFLAGS_LLVM="${WASI_CFLAGS} -pthread"
+WASI_CFLAGS="--sysroot ${WASI_SDK_PATH}/share/wasi-sysroot -mcpu=lime1"
+WASI_LDFLAGS="--sysroot ${WASI_SDK_PATH}/share/wasi-sysroot"
+WASI_CFLAGS_LLVM="${WASI_CFLAGS}"
 WASI_LDFLAGS_LLVM="${WASI_LDFLAGS}"
 # LLVM has some (unreachable in our configuration) calls to mmap.
 WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} -D_WASI_EMULATED_MMAN"
@@ -21,21 +20,16 @@ WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -lwasi-emulated-mman"
 WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -Wl,--max-memory=4294967296"
 # Compiling C++ code requires a lot of stack space and can overflow and corrupt the heap.
 # (For example, `#include <iostream>` alone does it in a build with the default stack size.)
-WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -Wl,-z,stack-size=1048576 -Wl,--stack-first"
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -Wl,-z,stack-size=8388608,--stack-first"
 # Some of the host APIs that are statically required by LLVM (notably threading) are dynamically
-# never used. An LTO build removes imports of these APIs, simplifying deployment
+# never used. An LTO build removes imports of these APIs, simplifying deployment.
 WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} -flto"
 WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -flto -Wl,--strip-all"
 
-# We need two toolchain files: one for the compiler itself (which needs threads at the moment since
-# -DLLVM_ENABLE_THREADS=OFF is kind of broken), and one for the runtime libs.
 cat >Toolchain-WASI.cmake <<END
-set(WASI TRUE)
-
-set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_NAME WASI)
 set(CMAKE_SYSTEM_VERSION 1)
 set(CMAKE_SYSTEM_PROCESSOR wasm32)
-set(CMAKE_EXECUTABLE_SUFFIX ".wasm")
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
@@ -43,25 +37,24 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 set(CMAKE_C_COMPILER ${WASI_SDK_PATH}/bin/clang)
+set(CMAKE_C_COMPILER_TARGET ${WASI_TARGET})
 set(CMAKE_CXX_COMPILER ${WASI_SDK_PATH}/bin/clang++)
-set(CMAKE_LINKER ${WASI_SDK_PATH}/bin/wasm-ld CACHE STRING "wasienv build")
-set(CMAKE_AR ${WASI_SDK_PATH}/bin/ar CACHE STRING "wasienv build")
-set(CMAKE_RANLIB ${WASI_SDK_PATH}/bin/ranlib CACHE STRING "wasienv build")
+set(CMAKE_CXX_COMPILER_TARGET ${WASI_TARGET})
+set(CMAKE_LINKER ${WASI_SDK_PATH}/bin/wasm-ld)
+set(CMAKE_AR ${WASI_SDK_PATH}/bin/ar)
+set(CMAKE_RANLIB ${WASI_SDK_PATH}/bin/ranlib)
+
 END
 cp Toolchain-WASI.cmake Toolchain-WASI-LLVM.cmake
 cat >>Toolchain-WASI.cmake <<END
-set(CMAKE_C_COMPILER_TARGET ${WASI_TARGET})
-set(CMAKE_CXX_COMPILER_TARGET ${WASI_TARGET})
-set(CMAKE_C_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS}" CACHE STRING "wasienv build")
-set(CMAKE_CXX_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS}" CACHE STRING "wasienv build")
-set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS}" CACHE STRING "wasienv build")
+set(CMAKE_C_FLAGS "${WASI_CFLAGS}")
+set(CMAKE_CXX_FLAGS "${WASI_CFLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS}")
 END
 cat >>Toolchain-WASI-LLVM.cmake <<END
-set(CMAKE_C_COMPILER_TARGET ${WASI_TARGET_LLVM})
-set(CMAKE_CXX_COMPILER_TARGET ${WASI_TARGET_LLVM})
-set(CMAKE_C_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS_LLVM}" CACHE STRING "wasienv build")
-set(CMAKE_CXX_FLAGS "${WASI_SYSROOT} ${WASI_CFLAGS_LLVM}" CACHE STRING "wasienv build")
-set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS_LLVM}" CACHE STRING "wasienv build")
+set(CMAKE_C_FLAGS "${WASI_CFLAGS_LLVM}")
+set(CMAKE_CXX_FLAGS "${WASI_CFLAGS_LLVM}")
+set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS_LLVM}")
 END
 
 # The clang binary built as `Debug` doesn't pass Wasm validation.
@@ -83,7 +76,7 @@ if ! [ -f llvm-tblgen-build/bin/llvm-tblgen -a -f llvm-tblgen-build/bin/clang-tb
     -DLLVM_INCLUDE_BENCHMARKS=OFF \
     -DLLVM_INCLUDE_DOCS=OFF \
     -DLLVM_TARGETS_TO_BUILD=WebAssembly \
-    -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi \
+    -DLLVM_DEFAULT_TARGET_TRIPLE=${WASI_TARGET} \
     -DLLVM_ENABLE_PROJECTS="clang" \
     -DCLANG_BUILD_EXAMPLES=OFF \
     -DCLANG_BUILD_TOOLS=OFF \
@@ -112,7 +105,7 @@ cmake -B llvm-build -S llvm-src/llvm \
   -DLLVM_INCLUDE_BENCHMARKS=OFF \
   -DLLVM_INCLUDE_DOCS=OFF \
   -DLLVM_TARGETS_TO_BUILD=WebAssembly \
-  -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1 \
+  -DLLVM_DEFAULT_TARGET_TRIPLE=${WASI_TARGET} \
   -DLLVM_TOOL_BUGPOINT_BUILD=OFF \
   -DLLVM_TOOL_BUGPOINT_PASSES_BUILD=OFF \
   -DLLVM_TOOL_DSYMUTIL_BUILD=OFF \
@@ -121,13 +114,13 @@ cmake -B llvm-build -S llvm-src/llvm \
   -DLLVM_TOOL_LLC_BUILD=OFF \
   -DLLVM_TOOL_LLI_BUILD=OFF \
   -DLLVM_TOOL_LLVM_AR_BUILD=ON \
-  -DLLVM_TOOL_LLVM_AS_BUILD=ON \
+  -DLLVM_TOOL_LLVM_AS_BUILD=OFF \
   -DLLVM_TOOL_LLVM_AS_FUZZER_BUILD=OFF \
   -DLLVM_TOOL_LLVM_BCANALYZER_BUILD=OFF \
   -DLLVM_TOOL_LLVM_CAT_BUILD=OFF \
   -DLLVM_TOOL_LLVM_CFI_VERIFY_BUILD=OFF \
   -DLLVM_TOOL_LLVM_CONFIG_BUILD=OFF \
-  -DLLVM_TOOL_LLVM_COV_BUILD=ON \
+  -DLLVM_TOOL_LLVM_COV_BUILD=OFF \
   -DLLVM_TOOL_LLVM_CVTRES_BUILD=OFF \
   -DLLVM_TOOL_LLVM_CXXDUMP_BUILD=OFF \
   -DLLVM_TOOL_LLVM_CXXFILT_BUILD=ON \
@@ -153,7 +146,7 @@ cmake -B llvm-build -S llvm-src/llvm \
   -DLLVM_TOOL_LLVM_JITLINK_BUILD=OFF \
   -DLLVM_TOOL_LLVM_JITLISTENER_BUILD=OFF \
   -DLLVM_TOOL_LLVM_LIBTOOL_DARWIN_BUILD=OFF \
-  -DLLVM_TOOL_LLVM_LINK_BUILD=ON \
+  -DLLVM_TOOL_LLVM_LINK_BUILD=OFF \
   -DLLVM_TOOL_LLVM_LIPO_BUILD=OFF \
   -DLLVM_TOOL_LLVM_LTO2_BUILD=OFF \
   -DLLVM_TOOL_LLVM_LTO_BUILD=OFF \
@@ -165,7 +158,7 @@ cmake -B llvm-build -S llvm-src/llvm \
   -DLLVM_TOOL_LLVM_ML_BUILD=OFF \
   -DLLVM_TOOL_LLVM_MODEXTRACT_BUILD=OFF \
   -DLLVM_TOOL_LLVM_MT_BUILD=OFF \
-  -DLLVM_TOOL_LLVM_NM_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_NM_BUILD=ON \
   -DLLVM_TOOL_LLVM_OBJCOPY_BUILD=ON \
   -DLLVM_TOOL_LLVM_OBJDUMP_BUILD=ON \
   -DLLVM_TOOL_LLVM_OPT_FUZZER_BUILD=OFF \
@@ -174,7 +167,7 @@ cmake -B llvm-build -S llvm-src/llvm \
   -DLLVM_TOOL_LLVM_PROFDATA_BUILD=OFF \
   -DLLVM_TOOL_LLVM_PROFGEN_BUILD=OFF \
   -DLLVM_TOOL_LLVM_RC_BUILD=OFF \
-  -DLLVM_TOOL_LLVM_READOBJ_BUILD=OFF \
+  -DLLVM_TOOL_LLVM_READOBJ_BUILD=ON \
   -DLLVM_TOOL_LLVM_READTAPI_BUILD=OFF \
   -DLLVM_TOOL_LLVM_REDUCE_BUILD=OFF \
   -DLLVM_TOOL_LLVM_REMARKUTIL_BUILD=OFF \
@@ -217,21 +210,20 @@ cmake -B llvm-build -S llvm-src/llvm \
   -DCLANG_INCLUDE_DOCS=OFF \
   -DCLANG_LINKS_TO_CREATE="clang;clang++" \
   -DLLD_BUILD_TOOLS=OFF \
-  -DCMAKE_INSTALL_PREFIX=llvm-prefix
+  -DCMAKE_INSTALL_PREFIX=llvm-prefix \
+  -DDEFAULT_SYSROOT=/usr \
+  -DCLANG_RESOURCE_DIR=/usr
 # The "all" target still contains far too much stuff, even given all the options above, so build
 # only Clang/LLD, explicitly. For the same reason using the "install" target is infeasible.
 # I spent a while trying and it leads nowhere.
 cmake --build llvm-build --target llvm-driver
-cmake --build llvm-build --target install-core-resource-headers
+cmake --build llvm-build --target clang-resource-headers
 
-# Install the driver (which is a multi-call binary) manually.
-mkdir -p wasi-prefix/bin
-cp llvm-build/bin/llvm wasi-prefix/bin/llvm.wasm
-
-# Install "core" headers (which are a part of the compiler and not the libc) manually.
-# Having the LLVM major version is an inconvenience in our case, since the compiler data files
-# are embedded into the binary and they won't ever conflict between versions.
-cp -r llvm-prefix/lib/clang/${LLVM_VERSION_MAJOR}/* wasi-prefix/
+# Install the headers manually.
+# Install the headers also manually.
+mkdir -p wasi-prefix/usr/
+rm -rf wasi-prefix/usr/include
+cp -v -r llvm-build/usr/include wasi-prefix/usr/
 
 # Options below heavily based on wasi-sdk.
 mkdir -p compiler-rt-build
@@ -244,23 +236,28 @@ cmake -B compiler-rt-build -S llvm-src/compiler-rt \
   -DCOMPILER_RT_ENABLE_IOS=OFF \
   -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
   -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON \
-  -DCMAKE_INSTALL_PREFIX=wasi-prefix
+  -DCMAKE_INSTALL_PREFIX=wasi-prefix/usr
 cmake --build compiler-rt-build --target install
 
+# There are many false positives with `check-symbols`, and the upstream eventually
+# moved to not check it by default too.
+mkdir -p wasi-libc-build
 make -C wasi-libc-src \
-  CC=${WASI_SDK_PATH}/bin/clang \
+  CC="ccache ${WASI_SDK_PATH}/bin/clang" \
   AR=${WASI_SDK_PATH}/bin/ar \
   NM=${WASI_SDK_PATH}/bin/nm \
   TARGET_TRIPLE=${WASI_TARGET} \
-  SYSROOT=$(pwd)/wasi-prefix
+  BUILTINS_LIB=$(pwd)/wasi-prefix/usr/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a \
+  SYSROOT=$(pwd)/wasi-prefix/usr \
+  OBJDIR=$(pwd)/wasi-libc-build
 
 # Options below heavily based on wasi-sdk.
 mkdir -p libcxx-build
 cmake -B libcxx-build -S llvm-src/runtimes \
   -DCMAKE_TOOLCHAIN_FILE=../Toolchain-WASI.cmake \
   -DLLVM_ENABLE_RUNTIMES:STRING="libcxx;libcxxabi" \
-  -DLIBCXX_ENABLE_THREADS:BOOL=OFF \
-  -DLIBCXX_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF \
+  -DLIBCXX_ENABLE_THREADS:BOOL=ON \
+  -DLIBCXX_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=ON \
   -DLIBCXX_ENABLE_SHARED:BOOL=OFF \
   -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=OFF \
   -DLIBCXX_ENABLE_FILESYSTEM:BOOL=ON \
@@ -270,8 +267,8 @@ cmake -B libcxx-build -S llvm-src/runtimes \
   -DLIBCXX_CXX_ABI_INCLUDE_PATHS=$(pwd)/llvm-src/libcxxabi/include \
   -DLIBCXX_HAS_MUSL_LIBC:BOOL=ON \
   -DLIBCXX_ABI_VERSION=2 \
-  -DLIBCXXABI_ENABLE_THREADS:BOOL=OFF \
-  -DLIBCXXABI_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF \
+  -DLIBCXXABI_ENABLE_THREADS:BOOL=ON \
+  -DLIBCXXABI_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=ON \
   -DLIBCXXABI_ENABLE_PIC:BOOL=OFF \
   -DLIBCXXABI_ENABLE_SHARED:BOOL=OFF \
   -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=OFF \
@@ -279,11 +276,5 @@ cmake -B libcxx-build -S llvm-src/runtimes \
   -DLIBCXXABI_SILENT_TERMINATE:BOOL=ON \
   -DLIBCXX_LIBDIR_SUFFIX=/${WASI_TARGET} \
   -DLIBCXXABI_LIBDIR_SUFFIX=/${WASI_TARGET} \
-  -DCMAKE_INSTALL_PREFIX=wasi-prefix
+  -DCMAKE_INSTALL_PREFIX=wasi-prefix/usr
 cmake --build libcxx-build --target install
-
-# Crimees. For testing only!
-cp driverdriver.py wasi-prefix/bin/
-for tool in $(__DRIVERDRIVER_LIST=1 ./driverdriver.py); do
-  ln -sf driverdriver.py wasi-prefix/bin/${tool}
-done
