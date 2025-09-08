@@ -5,7 +5,7 @@ export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 WASI_SDK=wasi-sdk-27.0
 WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz
 if ! [ -d ${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; fi
-WASI_SDK_PATH=$(pwd)/${WASI_SDK}
+WASI_SDK_PATH=$(pwd)/${WASI_SDK}-x86_64-linux
 
 WASI_SYSROOT="--sysroot ${WASI_SDK_PATH}/share/wasi-sysroot"
 WASI_TARGET="wasm32-wasip1"
