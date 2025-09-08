@@ -2,8 +2,8 @@
 
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 
-WASI_SDK=wasi-sdk-22.0
-WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-22/wasi-sdk-22.0-linux.tar.gz
+WASI_SDK=wasi-sdk-27.0
+WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz
 if ! [ -d ${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; fi
 WASI_SDK_PATH=$(pwd)/${WASI_SDK}
 
@@ -11,8 +11,8 @@ WASI_SYSROOT="--sysroot ${WASI_SDK_PATH}/share/wasi-sysroot"
 WASI_TARGET="wasm32-wasip1"
 WASI_CFLAGS=""
 WASI_LDFLAGS=""
-WASI_TARGET_LLVM="${WASI_TARGET}-threads"
-WASI_CFLAGS_LLVM="${WASI_CFLAGS} -pthread"
+WASI_TARGET_LLVM="${WASI_TARGET}"
+WASI_CFLAGS_LLVM="${WASI_CFLAGS}"
 WASI_LDFLAGS_LLVM="${WASI_LDFLAGS}"
 # LLVM has some (unreachable in our configuration) calls to mmap.
 WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} -D_WASI_EMULATED_MMAN"
@@ -259,8 +259,8 @@ mkdir -p libcxx-build
 cmake -B libcxx-build -S llvm-src/runtimes \
   -DCMAKE_TOOLCHAIN_FILE=../Toolchain-WASI.cmake \
   -DLLVM_ENABLE_RUNTIMES:STRING="libcxx;libcxxabi" \
-  -DLIBCXX_ENABLE_THREADS:BOOL=OFF \
-  -DLIBCXX_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF \
+  -DLIBCXX_ENABLE_THREADS:BOOL=ON \
+  -DLIBCXX_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=ON \
   -DLIBCXX_ENABLE_SHARED:BOOL=OFF \
   -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=OFF \
   -DLIBCXX_ENABLE_FILESYSTEM:BOOL=ON \
@@ -270,8 +270,8 @@ cmake -B libcxx-build -S llvm-src/runtimes \
   -DLIBCXX_CXX_ABI_INCLUDE_PATHS=$(pwd)/llvm-src/libcxxabi/include \
   -DLIBCXX_HAS_MUSL_LIBC:BOOL=ON \
   -DLIBCXX_ABI_VERSION=2 \
-  -DLIBCXXABI_ENABLE_THREADS:BOOL=OFF \
-  -DLIBCXXABI_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF \
+  -DLIBCXXABI_ENABLE_THREADS:BOOL=ON \
+  -DLIBCXXABI_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=ON \
   -DLIBCXXABI_ENABLE_PIC:BOOL=OFF \
   -DLIBCXXABI_ENABLE_SHARED:BOOL=OFF \
   -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=OFF \
