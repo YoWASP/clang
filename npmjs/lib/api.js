@@ -3,13 +3,14 @@ import * as resources from '../gen/llvm-resources.js';
 import { instantiate } from '../gen/llvm.js';
 
 import { Exit } from '@yowasp/runtime';
+export { Exit } from '@yowasp/runtime';
 
 const llvm = new Application(resources, instantiate, 'yowasp-llvm');
 const runLLVM = llvm.run.bind(llvm);
 
 function subcommand(command, subcommandName) {
-    return function (args, files, options) {
-        if (args === undefined || args == null)
+    return function (args = null, files = {}, options = {}) {
+        if (args === null)
             return command(args, files, options); // preload resources
         return command([subcommandName, ...args], files, options);
     }
@@ -17,8 +18,8 @@ function subcommand(command, subcommandName) {
 
 // horrific ??? code. [insert standard disclaimer here]
 // 'it cant hurt me if im not looking at it'
-function runClang(args, files, options = {}) {
-    if (args === undefined || args === null)
+function runClang(args = null, files = {}, options = {}) {
+    if (args === null)
         return runLLVM(args, files, options); // preload resources
 
     // We pattern-match output of `-###` plus `args` to understand which subprocesses to run.
