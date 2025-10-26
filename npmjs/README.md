@@ -10,6 +10,42 @@ At the moment, this package only offers an API allowing to run Clang and LLD in 
 [yowasp]: https://yowasp.github.io/
 
 
+Examples
+--------
+
+All examples below are written for Node.js; to run them, install `@yowasp/clang` first. The C/C++ code can be compiled equally well in the browser and other runtimes, but WASI is unevenly supported.
+
+### Hosted C++ executable
+
+```js
+import { runClang } from '@yowasp/clang';
+const { meow } = await runClang(['clang++', 'test.cc', '-o', 'meow'],
+    {"test.cc": `#include <iostream>\nint main() { std::cout << "meow++" << std::endl; }`});
+
+import { WASI } from 'node:wasi';
+const wasi = new WASI({ version: 'preview1' });
+const module = await WebAssembly.compile(meow);
+const instance = await WebAssembly.instantiate(module,
+    {wasi_snapshot_preview1: wasi.wasiImport});
+wasi.start(instance);
+// prints "meow++"
+```
+
+
+### Freestanding C library
+
+```js
+import { runClang } from '@yowasp/clang';
+const { 'a.out': wasm } = await runClang(['clang', '-nostdlib', '-Wl,--no-entry', 'test.c'], {
+    'test.c': 'int add(int a, int b) __attribute__((export_name("add"))) { return a + b; }'});
+
+const module = await WebAssembly.compile(wasm);
+const instance = await WebAssembly.instantiate(module);
+console.log('add(1, 2) =', instance.exports.add(1, 2));
+// prints "add(1, 2) = 3"
+```
+
+
 API reference
 -------------
 
