@@ -3,7 +3,7 @@ YoWASP Clang/LLD package
 
 This package provides a complete [Clang/LLD][] toolchain built for [WebAssembly][] and targeting WebAssembly as well. See the [overview of the YoWASP project][yowasp] for details.
 
-At the moment, this package only offers an API allowing to run Clang and LLD in a virtual filesystem; no executables are provided.
+At the moment, this package only offers an API allowing to run Clang and LLD in a virtual filesystem; no executables are provided. Note that if you are importing `.../gen/bundle.js` directly, you must use it as a module.
 
 [Clang/LLD]: https://llvm.org/
 [WebAssembly]: https://webassembly.org/
